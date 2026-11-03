@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /data/
+Disallow: /.git/
+
+Sitemap: https://mdrst.py/sitemap.xml
