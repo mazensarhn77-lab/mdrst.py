@@ -168,7 +168,7 @@ class Handler(SimpleHTTPRequestHandler):
     total=c.execute('SELECT COUNT(*) n FROM users WHERE role="user"').fetchone()['n'];active=c.execute("SELECT COUNT(*) n FROM users WHERE role='user' AND last_active>=?",( (datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=7)).isoformat(timespec='seconds'),)).fetchone()['n']
    return self.send_json({'users':[safeuser(x)|{'last_active':x['last_active']} for x in users if x['role']=='user'],'progress':[dict(x) for x in rows],'lesson_progress':[dict(x) for x in lessons],'ratings':[dict(x) for x in ratings],'events':[dict(x) for x in events],'agent_reports':AGENT.latest(5),'stats':{'users':total,'active':active,'errors':sum(1 for x in events if x['kind']=='error'),'courses':len(COURSES),'average_rating':round(sum(x['score'] for x in ratings)/len(ratings),1) if ratings else 0,'extra_lessons':extra_count,'extra_batch':extra_batch,'extra_batches_total':1+len(EXTRA_LESSON_BATCHES)}})
   # Expose only the public site shell and static assets; never serve source, .git, or database files.
-  public_paths={'/','/index.html','/robots.txt','/sitemap.xml'}
+  public_paths={'/','/index.html','/robots.txt','/sitemap.xml','/googlea44b177decab6a22.html'}
   if p in public_paths:
    relative='index.html' if p=='/' else p.lstrip('/')
    candidate=(ROOT/relative).resolve()
