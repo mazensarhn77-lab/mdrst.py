@@ -7,7 +7,7 @@ from maintenance_agent import MaintenanceAgent
 from content_packs import EXTRA_LESSON_BATCHES
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = Path(os.environ.get('ACADEMY_DATA_DIR', str(ROOT / 'data'))).resolve()
+DATA_DIR = Path(os.environ.get('ACADEMY_DATA_DIR') or os.environ.get('DATA_DIR') or str(ROOT / 'data')).resolve()
 DB = DATA_DIR / 'academy.sqlite3'
 ADMIN_FILE = DATA_DIR / 'admin-credentials.txt'
 COURSES = [
