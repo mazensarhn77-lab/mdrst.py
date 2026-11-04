@@ -2,7 +2,7 @@
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, urlsplit
 from pathlib import Path
-import sqlite3, json, secrets, hashlib, hmac, os, time, datetime, threading
+import sqlite3, json, secrets, hashlib, hmac, os, time, datetime, threading, re
 from maintenance_agent import MaintenanceAgent
 from content_packs import EXTRA_LESSON_BATCHES
 from database import USE_POSTGRES, connect as db_connect, is_unique_error
@@ -167,8 +167,10 @@ class Handler(SimpleHTTPRequestHandler):
      count=c.execute('SELECT COUNT(*) AS n FROM extra_lessons').fetchone()['n']
     return self.send_json({'status':'ok','database':'ok','extra_lessons':count})
    except Exception as exc:
-    # Keep credentials and provider error messages out of the public response.
-    return self.send_json({'status':'degraded','database':'error','error_type':type(exc).__name__,'sqlstate':getattr(exc,'sqlstate',None)},503)
+    # Return a sanitized provider/network hint; never expose URI credentials.
+    detail=str(exc).replace(os.environ.get('DATABASE_URL',''), '[DATABASE_URL]') if os.environ.get('DATABASE_URL') else str(exc)
+    detail=re.sub(r'(postgres(?:ql)?://)[^/@\s]+@', r'\1[credentials]@', detail)
+    return self.send_json({'status':'degraded','database':'error','error_type':type(exc).__name__,'sqlstate':getattr(exc,'sqlstate',None),'detail':detail[:300]},503)
   if p=='/api/content/extras':
    with connect() as c: rows=c.execute('SELECT id,course,title,summary,code,question,options,answer,batch FROM extra_lessons ORDER BY batch,course,id').fetchall()
    lessons=[dict(x)|{'options':json.loads(x['options'])} for x in rows]
