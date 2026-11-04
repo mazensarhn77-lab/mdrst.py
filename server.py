@@ -1,10 +1,11 @@
-"""Python Academy web app: SQLite auth/progress API and an auditable site-health bot."""
+"""Python Academy: SQLite locally or Supabase PostgreSQL in serverless production."""
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, urlsplit
 from pathlib import Path
 import sqlite3, json, secrets, hashlib, hmac, os, time, datetime, threading
 from maintenance_agent import MaintenanceAgent
 from content_packs import EXTRA_LESSON_BATCHES
+from database import USE_POSTGRES, connect as db_connect, is_unique_error
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get('ACADEMY_DATA_DIR') or os.environ.get('DATA_DIR') or str(ROOT / 'data')).resolve()
@@ -38,30 +39,47 @@ AUTH_WINDOW = 15 * 60
 AUTH_LIMIT = 8
 
 def connect():
- c=sqlite3.connect(DB,timeout=15); c.row_factory=sqlite3.Row; c.execute('PRAGMA foreign_keys=ON'); return c
+ return db_connect(DB, timeout=15)
 def init_db():
- DATA_DIR.mkdir(parents=True, exist_ok=True)
+ if os.environ.get('VERCEL') and not USE_POSTGRES:
+  raise RuntimeError('Set DATABASE_URL to a Supabase PostgreSQL connection string in Vercel')
+ if not USE_POSTGRES: DATA_DIR.mkdir(parents=True, exist_ok=True)
  with connect() as c:
-  c.executescript('''CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT UNIQUE NOT NULL,name TEXT NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'user',created_at TEXT NOT NULL,last_active TEXT NOT NULL);
-  CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,expires INTEGER NOT NULL);
-  CREATE TABLE IF NOT EXISTS progress(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,course TEXT NOT NULL,completed INTEGER NOT NULL DEFAULT 0,quiz_score INTEGER NOT NULL DEFAULT 0,activity_count INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(user_id,course));
-  CREATE TABLE IF NOT EXISTS lesson_progress(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,course TEXT NOT NULL,lesson_index INTEGER NOT NULL,completed INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(user_id,course,lesson_index));
-  CREATE TABLE IF NOT EXISTS extra_lessons(id TEXT PRIMARY KEY,course TEXT NOT NULL,title TEXT NOT NULL,summary TEXT NOT NULL,code TEXT NOT NULL,question TEXT NOT NULL,options TEXT NOT NULL,answer INTEGER NOT NULL,created_at TEXT NOT NULL,batch INTEGER NOT NULL DEFAULT 1);
-  CREATE TABLE IF NOT EXISTS ratings(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,course TEXT NOT NULL,score INTEGER NOT NULL CHECK(score BETWEEN 1 AND 5),updated_at TEXT NOT NULL,PRIMARY KEY(user_id,course));
-  CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,kind TEXT NOT NULL,message TEXT NOT NULL,created_at TEXT NOT NULL,resolved INTEGER NOT NULL DEFAULT 0);
-  CREATE TABLE IF NOT EXISTS insights(id INTEGER PRIMARY KEY,message TEXT NOT NULL,created_at TEXT NOT NULL,kind TEXT NOT NULL DEFAULT 'suggestion');''')
-  extra_columns={r['name'] for r in c.execute('PRAGMA table_info(extra_lessons)').fetchall()}
+  if USE_POSTGRES:
+   c.execute("""CREATE TABLE IF NOT EXISTS users(id BIGSERIAL PRIMARY KEY,email TEXT UNIQUE NOT NULL,name TEXT NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'user',created_at TEXT NOT NULL,last_active TEXT NOT NULL)""")
+   c.execute("""CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,expires BIGINT NOT NULL)""")
+   c.execute("""CREATE TABLE IF NOT EXISTS progress(user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,course TEXT NOT NULL,completed INTEGER NOT NULL DEFAULT 0,quiz_score INTEGER NOT NULL DEFAULT 0,activity_count INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(user_id,course))""")
+   c.execute("""CREATE TABLE IF NOT EXISTS lesson_progress(user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,course TEXT NOT NULL,lesson_index INTEGER NOT NULL,completed INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(user_id,course,lesson_index))""")
+   c.execute("""CREATE TABLE IF NOT EXISTS extra_lessons(id TEXT PRIMARY KEY,course TEXT NOT NULL,title TEXT NOT NULL,summary TEXT NOT NULL,code TEXT NOT NULL,question TEXT NOT NULL,options TEXT NOT NULL,answer INTEGER NOT NULL,created_at TEXT NOT NULL,batch INTEGER NOT NULL DEFAULT 1)""")
+   c.execute("""CREATE TABLE IF NOT EXISTS ratings(user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,course TEXT NOT NULL,score INTEGER NOT NULL CHECK(score BETWEEN 1 AND 5),updated_at TEXT NOT NULL,PRIMARY KEY(user_id,course))""")
+   c.execute("""CREATE TABLE IF NOT EXISTS events(id BIGSERIAL PRIMARY KEY,kind TEXT NOT NULL,message TEXT NOT NULL,created_at TEXT NOT NULL,resolved INTEGER NOT NULL DEFAULT 0)""")
+   c.execute("""CREATE TABLE IF NOT EXISTS insights(id BIGSERIAL PRIMARY KEY,message TEXT NOT NULL,created_at TEXT NOT NULL,kind TEXT NOT NULL DEFAULT 'suggestion')""")
+   c.execute("""CREATE TABLE IF NOT EXISTS agent_reports(id BIGSERIAL PRIMARY KEY,created_at TEXT NOT NULL,status TEXT NOT NULL,summary TEXT NOT NULL,signals TEXT NOT NULL,actions TEXT NOT NULL)""")
+  else:
+   c.raw.executescript('''CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT UNIQUE NOT NULL,name TEXT NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'user',created_at TEXT NOT NULL,last_active TEXT NOT NULL);
+   CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,expires INTEGER NOT NULL);
+   CREATE TABLE IF NOT EXISTS progress(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,course TEXT NOT NULL,completed INTEGER NOT NULL DEFAULT 0,quiz_score INTEGER NOT NULL DEFAULT 0,activity_count INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(user_id,course));
+   CREATE TABLE IF NOT EXISTS lesson_progress(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,course TEXT NOT NULL,lesson_index INTEGER NOT NULL,completed INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(user_id,course,lesson_index));
+   CREATE TABLE IF NOT EXISTS extra_lessons(id TEXT PRIMARY KEY,course TEXT NOT NULL,title TEXT NOT NULL,summary TEXT NOT NULL,code TEXT NOT NULL,question TEXT NOT NULL,options TEXT NOT NULL,answer INTEGER NOT NULL,created_at TEXT NOT NULL,batch INTEGER NOT NULL DEFAULT 1);
+   CREATE TABLE IF NOT EXISTS ratings(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,course TEXT NOT NULL,score INTEGER NOT NULL CHECK(score BETWEEN 1 AND 5),updated_at TEXT NOT NULL,PRIMARY KEY(user_id,course));
+   CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,kind TEXT NOT NULL,message TEXT NOT NULL,created_at TEXT NOT NULL,resolved INTEGER NOT NULL DEFAULT 0);
+   CREATE TABLE IF NOT EXISTS insights(id INTEGER PRIMARY KEY,message TEXT NOT NULL,created_at TEXT NOT NULL,kind TEXT NOT NULL DEFAULT 'suggestion');''')
+  if USE_POSTGRES:
+   extra_columns={r['column_name'] for r in c.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='extra_lessons'").fetchall()}
+  else:
+   extra_columns={r['name'] for r in c.execute('PRAGMA table_info(extra_lessons)').fetchall()}
   if 'batch' not in extra_columns:c.execute('ALTER TABLE extra_lessons ADD COLUMN batch INTEGER NOT NULL DEFAULT 1')
   # Preserve lesson visibility for accounts that completed levels before lesson tracking existed.
   legacy=c.execute('SELECT user_id,course FROM progress WHERE completed=1').fetchall()
   for row in legacy:
    for lesson_index in range(4):
-    c.execute('INSERT OR IGNORE INTO lesson_progress(user_id,course,lesson_index,completed,updated_at) VALUES(?,?,?,1,?)',(row['user_id'],row['course'],lesson_index,utcnow()))
+    c.execute('INSERT INTO lesson_progress(user_id,course,lesson_index,completed,updated_at) VALUES(?,?,?,1,?) ON CONFLICT(user_id,course,lesson_index) DO NOTHING',(row['user_id'],row['course'],lesson_index,utcnow()))
   admin_email=os.environ.get('ADMIN_EMAIL','admin@academy.local').strip().lower()
   admin_password=os.environ.get('ADMIN_PASSWORD')
   row=c.execute("SELECT id FROM users WHERE role='admin' LIMIT 1").fetchone()
   if not row:
    if not admin_password:
+    if USE_POSTGRES: raise RuntimeError('Set ADMIN_EMAIL and ADMIN_PASSWORD before the first Supabase initialization')
     admin_password=secrets.token_urlsafe(15)
     ADMIN_FILE.write_text(f'Admin login\nEmail: {admin_email}\nPassword: {admin_password}\nChange these credentials by setting ADMIN_EMAIL and ADMIN_PASSWORD before first launch.\n',encoding='utf-8')
     try: os.chmod(ADMIN_FILE,0o600)
@@ -165,7 +183,7 @@ class Handler(SimpleHTTPRequestHandler):
     events=c.execute('SELECT * FROM events ORDER BY id DESC LIMIT 30').fetchall()
     extra_count=c.execute('SELECT COUNT(*) n FROM extra_lessons').fetchone()['n']
     extra_batch=c.execute('SELECT COALESCE(MAX(batch),0) n FROM extra_lessons').fetchone()['n']
-    total=c.execute('SELECT COUNT(*) n FROM users WHERE role="user"').fetchone()['n'];active=c.execute("SELECT COUNT(*) n FROM users WHERE role='user' AND last_active>=?",( (datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=7)).isoformat(timespec='seconds'),)).fetchone()['n']
+    total=c.execute("SELECT COUNT(*) n FROM users WHERE role='user'").fetchone()['n'];active=c.execute("SELECT COUNT(*) n FROM users WHERE role='user' AND last_active>=?",( (datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=7)).isoformat(timespec='seconds'),)).fetchone()['n']
    return self.send_json({'users':[safeuser(x)|{'last_active':x['last_active']} for x in users if x['role']=='user'],'progress':[dict(x) for x in rows],'lesson_progress':[dict(x) for x in lessons],'ratings':[dict(x) for x in ratings],'events':[dict(x) for x in events],'agent_reports':AGENT.latest(5),'stats':{'users':total,'active':active,'errors':sum(1 for x in events if x['kind']=='error'),'courses':len(COURSES),'average_rating':round(sum(x['score'] for x in ratings)/len(ratings),1) if ratings else 0,'extra_lessons':extra_count,'extra_batch':extra_batch,'extra_batches_total':1+len(EXTRA_LESSON_BATCHES)}})
   # Expose only the public site shell and static assets; never serve source, .git, or database files.
   public_paths={'/','/index.html','/robots.txt','/sitemap.xml','/googlea44b177decab6a22.html'}
@@ -192,8 +210,9 @@ class Handler(SimpleHTTPRequestHandler):
     return self.send_json({'error':'أدخل اسماً وبريداً صحيحاً وكلمة مرور من 10 أحرف على الأقل'},400)
    now=utcnow()
    try:
-    with connect() as c:uid=c.execute('INSERT INTO users(email,name,password,created_at,last_active) VALUES(?,?,?,?,?)',(email,name,hashpw(pw),now,now)).lastrowid
-   except sqlite3.IntegrityError:
+    with connect() as c:uid=c.execute('INSERT INTO users(email,name,password,created_at,last_active) VALUES(?,?,?,?,?) RETURNING id',(email,name,hashpw(pw),now,now)).fetchone()['id']
+   except Exception as exc:
+    if not is_unique_error(exc): raise
     self.fail_auth('register',identity)
     return self.send_json({'error':'هذا البريد مسجل مسبقاً'},409)
    self.clear_auth_failures('register',identity)
@@ -263,7 +282,7 @@ class Handler(SimpleHTTPRequestHandler):
     lessons_done=c.execute('SELECT COUNT(*) n FROM lesson_progress WHERE user_id=? AND course=? AND completed=1',(u['id'],course)).fetchone()['n']
     already=c.execute('SELECT completed FROM progress WHERE user_id=? AND course=?',(u['id'],course)).fetchone()
     if lessons_done<4 and not (already and already['completed']):return self.send_json({'error':'أكمل الدروس الأربعة قبل الاختبار الختامي'},403)
-    c.execute('INSERT INTO progress VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,course) DO UPDATE SET completed=MAX(completed,excluded.completed),quiz_score=MAX(quiz_score,excluded.quiz_score),activity_count=activity_count+1,updated_at=excluded.updated_at',(u['id'],course,done,score,1,utcnow()))
+    c.execute('INSERT INTO progress VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,course) DO UPDATE SET completed=CASE WHEN completed>excluded.completed THEN completed ELSE excluded.completed END,quiz_score=CASE WHEN quiz_score>excluded.quiz_score THEN quiz_score ELSE excluded.quiz_score END,activity_count=activity_count+1,updated_at=excluded.updated_at',(u['id'],course,done,score,1,utcnow()))
    return self.send_json({'ok':True,'score':score})
   if p=='/api/event':
    kind=str(d.get('kind','error'));message=str(d.get('message',''))
@@ -282,7 +301,7 @@ class Handler(SimpleHTTPRequestHandler):
    now=utcnow();added=0
    with connect() as c:
     for lesson in pack:
-     cur=c.execute('INSERT OR IGNORE INTO extra_lessons(id,course,title,summary,code,question,options,answer,created_at,batch) VALUES(?,?,?,?,?,?,?,?,?,?)',(lesson['id'],lesson['course'],lesson['title'],lesson['summary'],lesson['code'],lesson['question'],json.dumps(lesson['options'],ensure_ascii=False),lesson['answer'],now,next_batch))
+     cur=c.execute('INSERT INTO extra_lessons(id,course,title,summary,code,question,options,answer,created_at,batch) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING',(lesson['id'],lesson['course'],lesson['title'],lesson['summary'],lesson['code'],lesson['question'],json.dumps(lesson['options'],ensure_ascii=False),lesson['answer'],now,next_batch))
      added+=cur.rowcount
     total=c.execute('SELECT COUNT(*) n FROM extra_lessons').fetchone()['n']
    if added:report_event('feedback',f'Admin published content batch {next_batch} with {added} lessons')
@@ -300,8 +319,8 @@ class Handler(SimpleHTTPRequestHandler):
    u=self.require(True)
    if not u:return
    with connect() as c:
-    active=c.execute('SELECT COUNT(*) n FROM users WHERE role="user" AND last_active>=?',((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=7)).isoformat(timespec='seconds'),)).fetchone()['n']
-    done=c.execute('SELECT COUNT(*) n FROM progress WHERE completed=1').fetchone()['n'];err=c.execute('SELECT COUNT(*) n FROM events WHERE kind="error" AND created_at>=?',((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=1)).isoformat(timespec='seconds'),)).fetchone()['n']
+    active=c.execute("SELECT COUNT(*) n FROM users WHERE role='user' AND last_active>=?",((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=7)).isoformat(timespec='seconds'),)).fetchone()['n']
+    done=c.execute('SELECT COUNT(*) n FROM progress WHERE completed=1').fetchone()['n'];err=c.execute("SELECT COUNT(*) n FROM events WHERE kind='error' AND created_at>=?",((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=1)).isoformat(timespec='seconds'),)).fetchone()['n']
     suggestions=[]
     if err:suggestions.append(f'رُصد {err} خطأ خلال آخر 24 ساعة؛ راجع سجل الأعطال قبل نشر التغييرات.')
     if active==0:suggestions.append('لا يوجد نشاط مسجل خلال الأسبوع الأخير؛ راجع تجربة التسجيل وتذكيرات العودة.')

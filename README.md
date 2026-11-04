@@ -86,7 +86,18 @@ python server.py
 5. افتح رابط `onrender.com` الذي يظهر في صفحة الخدمة. تحقق من أن `/api/health` يعرض `status: ok`، ثم سجّل الدخول بحساب الأدمن وأنشئ حساب مستخدم تجريبياً.
 6. النشر التلقائي مفعّل: كل commit إلى الفرع المتصل يبدأ نشر نسخة جديدة.
 
-### الظهور في بحث Google
+### Vercel with Supabase PostgreSQL
+
+The Python API is exposed through `api/[...path].py`; the static homepage remains served from the project root. When `DATABASE_URL` is set, the application uses Supabase PostgreSQL instead of local SQLite. The function initializes the schema on cold start. For Vercel serverless functions, use the Supabase **Transaction pooler** connection string (port 6543) and keep prepared statements disabled in the driver.
+
+1. Create a Supabase project and copy its Transaction pooler URI from **Connect**. Do not put it in browser JavaScript or commit it.
+2. In Vercel → Project → Settings → Environment Variables, add `DATABASE_URL`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, and `COOKIE_SECURE=1`; use a new, unique admin password. Set `PUBLIC_PROXY=1` to respect Vercel's forwarded client IP for rate limiting.
+3. Redeploy the Vercel project. On first API invocation, an empty Supabase database gets the tables and admin account. `ADMIN_EMAIL` and `ADMIN_PASSWORD` seed the admin only when no admin exists.
+4. Check `/api/health` and `/api/content/extras`, then create a regular test account from the site.
+
+Supabase stores production accounts separately from the local SQLite file; the application does not automatically import the ignored local `data/` database.
+
+## الظهور في بحث Google
 
 أضفت `robots.txt` و`sitemap.xml` ووصف الصفحة والروابط الاجتماعية وcanonical للنطاق `https://mdrst.py/`. بعد ربط النطاق ونشر الموقع:
 

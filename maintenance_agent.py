@@ -9,6 +9,7 @@ administrator configures an endpoint); it receives only aggregated signals.
 from __future__ import annotations
 import json, os, sqlite3, time, datetime, urllib.request, urllib.error, re
 from pathlib import Path
+from database import connect as db_connect, USE_POSTGRES
 
 
 def now_iso():
@@ -21,9 +22,7 @@ class MaintenanceAgent:
         self.interval = max(60, int(os.environ.get("AGENT_INTERVAL_SECONDS", "300")))
 
     def db(self):
-        c = sqlite3.connect(self.db_path, timeout=10)
-        c.row_factory = sqlite3.Row
-        return c
+        return db_connect(self.db_path, timeout=10)
 
     def _safe_repairs(self, c):
         """Only apply bounded, non-destructive repairs from this explicit list."""
@@ -37,15 +36,18 @@ class MaintenanceAgent:
         c.execute("CREATE INDEX IF NOT EXISTS idx_users_activity ON users(last_active)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at)")
         actions.append("تم التحقق من فهارس الجلسات والنشاط والأحداث")
-        c.execute("PRAGMA optimize")
+        if USE_POSTGRES:
+            c.execute("ANALYZE")
+        else:
+            c.execute("PRAGMA optimize")
         return actions
 
     def _signals(self, c):
         day_ago = (datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=1)).isoformat(timespec="seconds")
         week_ago = (datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=7)).isoformat(timespec="seconds")
-        users = c.execute("SELECT COUNT(*) FROM users WHERE role='user'").fetchone()[0]
-        active = c.execute("SELECT COUNT(*) FROM users WHERE role='user' AND last_active>=?", (week_ago,)).fetchone()[0]
-        completed = c.execute("SELECT COUNT(*) FROM progress WHERE completed=1 AND quiz_score>=70").fetchone()[0]
+        users = c.execute("SELECT COUNT(*) AS n FROM users WHERE role='user'").fetchone()["n"]
+        active = c.execute("SELECT COUNT(*) AS n FROM users WHERE role='user' AND last_active>=?", (week_ago,)).fetchone()["n"]
+        completed = c.execute("SELECT COUNT(*) AS n FROM progress WHERE completed=1 AND quiz_score>=70").fetchone()["n"]
         errors = c.execute("SELECT kind,message,COUNT(*) AS n,MAX(created_at) AS latest FROM events WHERE kind='error' AND created_at>=? GROUP BY kind,message ORDER BY n DESC LIMIT 10", (day_ago,)).fetchall()
         activity = c.execute("SELECT course,SUM(activity_count) AS n FROM progress GROUP BY course ORDER BY n DESC").fetchall()
         return {
@@ -113,17 +115,21 @@ class MaintenanceAgent:
         actions, issues = [], []
         with self.db() as c:
             try:
-                check = c.execute("PRAGMA quick_check").fetchone()[0]
-                if check != "ok":
+                if USE_POSTGRES:
+                    c.execute("SELECT 1 AS ok")
+                    check_ok = True
+                else:
+                    check_ok = c.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+                if not check_ok:
                     issues.append("فشل فحص تكامل قاعدة البيانات؛ أوقف الكتابة وخذ نسخة احتياطية وافحصها يدوياً.")
                 else:
                     actions = self._safe_repairs(c)
-            except sqlite3.Error as exc:
-                issues.append(f"تعذر تنفيذ فحص/صيانة SQLite ({type(exc).__name__}); يلزم فحص الأدمن.")
+            except Exception as exc:
+                issues.append(f"تعذر تنفيذ فحص قاعدة البيانات ({type(exc).__name__}); يلزم فحص الأدمن.")
             signals = self._signals(c)
             suggestions = issues + self._rules(signals, actions)
             suggestions += self._model_suggestions(signals)
-            c.execute("CREATE TABLE IF NOT EXISTS agent_reports(id INTEGER PRIMARY KEY,created_at TEXT NOT NULL,status TEXT NOT NULL,summary TEXT NOT NULL,signals TEXT NOT NULL,actions TEXT NOT NULL)")
+            c.execute("CREATE TABLE IF NOT EXISTS agent_reports(id BIGSERIAL PRIMARY KEY,created_at TEXT NOT NULL,status TEXT NOT NULL,summary TEXT NOT NULL,signals TEXT NOT NULL,actions TEXT NOT NULL)" if USE_POSTGRES else "CREATE TABLE IF NOT EXISTS agent_reports(id INTEGER PRIMARY KEY,created_at TEXT NOT NULL,status TEXT NOT NULL,summary TEXT NOT NULL,signals TEXT NOT NULL,actions TEXT NOT NULL)")
             status = "attention" if issues or signals["errors_24h"] else "ok"
             summary = " | ".join(suggestions)
             c.execute("INSERT INTO agent_reports(created_at,status,summary,signals,actions) VALUES(?,?,?,?,?)", (now_iso(),status,summary,json.dumps(signals,ensure_ascii=False),json.dumps(actions,ensure_ascii=False)))
@@ -134,7 +140,7 @@ class MaintenanceAgent:
 
     def latest(self, limit=10):
         with self.db() as c:
-            c.execute("CREATE TABLE IF NOT EXISTS agent_reports(id INTEGER PRIMARY KEY,created_at TEXT NOT NULL,status TEXT NOT NULL,summary TEXT NOT NULL,signals TEXT NOT NULL,actions TEXT NOT NULL)")
+            c.execute("CREATE TABLE IF NOT EXISTS agent_reports(id BIGSERIAL PRIMARY KEY,created_at TEXT NOT NULL,status TEXT NOT NULL,summary TEXT NOT NULL,signals TEXT NOT NULL,actions TEXT NOT NULL)" if USE_POSTGRES else "CREATE TABLE IF NOT EXISTS agent_reports(id INTEGER PRIMARY KEY,created_at TEXT NOT NULL,status TEXT NOT NULL,summary TEXT NOT NULL,signals TEXT NOT NULL,actions TEXT NOT NULL)")
             return [dict(r) for r in c.execute("SELECT * FROM agent_reports ORDER BY id DESC LIMIT ?", (limit,)).fetchall()]
 
     def serve(self):

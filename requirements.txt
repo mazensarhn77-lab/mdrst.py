@@ -1,1 +1,2 @@
-# Uses only the Python standard library; no third-party dependencies.
+# PostgreSQL driver for Supabase; SQLite remains built into Python for local/Render deployments.
+psycopg[binary]>=3.2,<4
