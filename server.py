@@ -86,6 +86,17 @@ def init_db():
     except OSError: pass
    now=utcnow();c.execute('INSERT INTO users(email,name,password,role,created_at,last_active) VALUES(?,?,?,?,?,?)',(admin_email,'مدير المنصة',hashpw(admin_password),'admin',now,now))
    print(f'\nAdmin account created: {admin_email}\nCredentials saved privately in {ADMIN_FILE}\n')
+def ensure_db_schema():
+ # A newly configured serverless database may be reachable before its schema
+ # has been initialized. Bootstrap only when the primary table is missing.
+ try:
+  with connect() as c:c.execute('SELECT 1 FROM extra_lessons LIMIT 0')
+ except Exception as exc:
+  if getattr(exc,'sqlstate',None)=='42P01' or 'no such table' in str(exc).lower():
+   init_db()
+  else:
+   raise
+
 def utcnow(): return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
 def hashpw(p,salt=None):
  # PBKDF2 is a one-way password hash: the original password is never stored.
@@ -163,6 +174,7 @@ class Handler(SimpleHTTPRequestHandler):
    # Check the actual serverless database path too; a process-only health
    # response can hide broken Supabase configuration and missing schema.
    try:
+    ensure_db_schema()
     with connect() as c:
      count=c.execute('SELECT COUNT(*) AS n FROM extra_lessons').fetchone()['n']
     return self.send_json({'status':'ok','database':'ok','extra_lessons':count})
@@ -172,6 +184,7 @@ class Handler(SimpleHTTPRequestHandler):
     detail=re.sub(r'(postgres(?:ql)?://)[^/@\s]+@', r'\1[credentials]@', detail)
     return self.send_json({'status':'degraded','database':'error','error_type':type(exc).__name__,'sqlstate':getattr(exc,'sqlstate',None),'detail':detail[:300]},503)
   if p=='/api/content/extras':
+   ensure_db_schema()
    with connect() as c: rows=c.execute('SELECT id,course,title,summary,code,question,options,answer,batch FROM extra_lessons ORDER BY batch,course,id').fetchall()
    lessons=[dict(x)|{'options':json.loads(x['options'])} for x in rows]
    return self.send_json({'lessons':lessons})
