@@ -74,7 +74,7 @@ def init_db():
   for row in legacy:
    for lesson_index in range(4):
     c.execute('INSERT INTO lesson_progress(user_id,course,lesson_index,completed,updated_at) VALUES(?,?,?,1,?) ON CONFLICT(user_id,course,lesson_index) DO NOTHING',(row['user_id'],row['course'],lesson_index,utcnow()))
-  admin_email=os.environ.get('ADMIN_EMAIL','admin@academy.local').strip().lower()
+  admin_email=os.environ.get('ADMIN_EMAIL','mazensarhn@gmail.com').strip().lower()
   admin_password=os.environ.get('ADMIN_PASSWORD')
   row=c.execute("SELECT id FROM users WHERE role='admin' LIMIT 1").fetchone()
   if not row:
