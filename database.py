@@ -27,7 +27,7 @@ def connect(sqlite_path, timeout=15):
         import psycopg
         from psycopg.rows import dict_row
         # Transaction pooling (recommended for serverless) does not support prepared statements.
-        raw = psycopg.connect(DATABASE_URL, row_factory=dict_row, prepare_threshold=0, connect_timeout=10)
+        raw = psycopg.connect(DATABASE_URL, row_factory=dict_row, prepare_threshold=None, connect_timeout=10)
         return Connection(raw, postgres=True)
     raw = sqlite3.connect(sqlite_path, timeout=timeout)
     raw.row_factory = sqlite3.Row
